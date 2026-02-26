@@ -76,7 +76,28 @@
 
 ---
 
+## 2026-02-24: 按国家/地区重新组织目录结构
+
+**改动**：
+- 原来的 `scrapers/sitemap/`, `scrapers/pagination/`, `scrapers/playwright/` 按爬取模式分目录
+- 改为按国家/地区分目录: `scrapers/indonesia/`, `scrapers/singapore/`, `scrapers/worldwide/` 等
+- 所有爬虫移到对应国家目录，同一目录下混合 sitemap/pagination/playwright 类型
+
+**效果**：目录结构更清晰，按地区管理爬虫
+
+---
+
 ## 新增爬虫记录
+
+### 2026-02-24 批次 (8个新爬虫)
+- hungrygowhere (新加坡餐厅搜索，Next.js SSR，sitemap)
+- destinasian (亚洲高端旅行杂志，Next.js Apollo 状态解析，sitemap)
+- guide_to_ph (菲律宾旅游指南，Next.js SSR + JSON-LD，sitemap，~465 articles)
+- travel_leisure_asia (亚洲旅行杂志，参数化 :region，5 个区域，sitemap，20k+ articles)
+- girl_on_a_zebra (亚太旅行博客，Rank Math，sitemap，~403 articles)
+- hey_roseanne (韩国旅行博客，Rank Math，sitemap，~159 articles)
+- aperitif (巴厘岛精品餐饮博客，Yoast + Gutenberg，sitemap，~128 articles)
+- detik_food (印尼美食门户，CDATA sitemap，JSON-LD NewsArticle，~200 articles)
 
 ### 2026-02-02 批次
 - renaesworld (澳洲旅游博客，CDATA sitemap)

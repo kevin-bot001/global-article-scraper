@@ -1,13 +1,13 @@
 # Global Article Scraper
 
-一个高效的多网站文章爬虫系统，专注于东南亚地区的生活方式、旅游、美食内容抓取。
+一个高效的多网站文章爬虫系统，专注于东南亚及亚太地区的生活方式、旅游、美食内容抓取。
 
 ## 特性
 
-- **23+ 网站支持**：覆盖印尼、新加坡、香港、泰国等地区的主流生活方式媒体
+- **64 个爬虫**：覆盖 9 个国家/地区的主流生活方式媒体（53 Sitemap + 10 Pagination + 1 Playwright）
 - **智能反爬绕过**：使用 curl_cffi TLS 指纹伪装，可绕过大部分 Cloudflare 保护
-- **多模式爬取**：支持 Sitemap、Google News Sitemap、分页列表等多种模式
-- **多城市参数化**：部分爬虫支持城市参数，如 `honeycombers:singapore`
+- **多模式爬取**：支持 Sitemap、Google News Sitemap、CDATA Sitemap、分页列表、Playwright 等
+- **多城市/多区域参数化**：部分爬虫支持城市/区域参数，如 `honeycombers:singapore`、`travel_leisure_asia:sg`
 - **BigQuery 集成**：支持直接写入 BigQuery，MERGE 策略自动去重
 - **增量爬取**：支持 `--since` 参数，只爬取指定日期之后的文章
 - **AI 辅助开发**：内置 Claude Code Skill，自然语言构建新爬虫
@@ -27,10 +27,13 @@ pip install -r requirements.txt
 python main.py --list
 
 # 运行单个爬虫
-python main.py -s migrationology -l 100 -v
+python main.py -s eatbook -l 100 -v
 
 # 多城市爬虫
 python main.py -s honeycombers:singapore -l 50
+
+# 多区域爬虫
+python main.py -s travel_leisure_asia:sg -l 50
 
 # 写入 BigQuery
 python main.py -s hotelier --bq
@@ -53,27 +56,32 @@ python main.py -s renaesworld --since 2025-01-01 --bq
 
 ## 支持的网站
 
-### 多城市爬虫
+### 按地区分布
 
-| 爬虫 | 网站 | 支持城市 |
-|------|------|----------|
-| honeycombers | thehoneycombers.com | singapore, bali, hong-kong |
-| chope | chope.co | jakarta, bali, singapore, bangkok |
-| timeout | timeout.com | jakarta, singapore, hong-kong |
-| coconuts | coconuts.co | jakarta, singapore, bangkok |
-| culture_trip | theculturetrip.com | jakarta, tokyo, seoul, bali |
+| 地区 | 爬虫数量 | 覆盖网站 |
+|------|---------|---------|
+| 🇮🇩 Indonesia | 24 | Manual Jakarta, Detik Food, Kompas Food, Aperitif 等 |
+| 🇸🇬 Singapore | 8 | Eatbook, Seth Lui, HungryGoWhere, Miss Tam Chiak 等 |
+| 🇹🇭 Thailand | 3 | BKK Foodie, Bangkok Foodies, Clever Thai |
+| 🇲🇾 Malaysia | 2 | KL Foodie, Malaysian Foodie |
+| 🇵🇭 Philippines | 2 | Booky PH, Guide to PH |
+| 🇻🇳 Vietnam | 1 | Vietnam Insiders |
+| 🇹🇼 Taiwan | 2 | Eating in Taipei, OpenRice TW |
+| 🇭🇰 Hong Kong | 1 | OpenRice HK |
+| 🌏 Worldwide | 21 | Michelin Guide, Eater, CNN Travel, Travel+Leisure Asia 等 |
 
-### 单一网站爬虫
+### 参数化爬虫
 
-| 爬虫 | 网站 | 地区 |
-|------|------|------|
-| migrationology | migrationology.com | 全球 |
-| renaesworld | renaesworld.com.au | 澳洲/全球 |
-| manual_jakarta | manual.co.id | 雅加达 |
-| hotelier | hotelier.id | 印尼 |
-| kompas_travel | travel.kompas.com | 印尼 |
-| alinear | alinear.id | 印尼（英语） |
-| ... | ... | ... |
+| 爬虫 | 网站 | 参数类型 | 支持的值 |
+|------|------|----------|---------|
+| honeycombers | thehoneycombers.com | city | singapore, bali, hong-kong |
+| chope | chope.co | city | jakarta, bali, singapore, bangkok |
+| timeout | timeout.com | city | jakarta, singapore, hong-kong |
+| culture_trip | theculturetrip.com | city | jakarta, tokyo, seoul, bali |
+| travel_leisure_asia | travelandleisureasia.com | region | sea, sg, hk, th, my |
+| lonely_planet | lonelyplanet.com | continent | asia, europe, africa |
+| whats_new_indonesia | whatsnewindonesia.com | city | jakarta, bali |
+| idntimes | idntimes.com | city | bali, jabar |
 
 完整列表请运行 `python main.py --list`
 
@@ -83,16 +91,17 @@ python main.py -s renaesworld --since 2025-01-01 --bq
 
 ```python
 # BigQuery 配置
-BQ_CONFIG = {
-    "project": "your-gcp-project",
-    "dataset": "your-dataset",
-    "table": "articles",
+STORAGE_CONFIG = {
+    "bigquery": {
+        "project_id": "your-gcp-project",
+        "dataset": "your-dataset",
+        "table": "articles",
+    },
 }
 
 # 代理配置
 PROXY_CONFIG = {
-    "enabled": True,
-    "proxy_pool_url": "http://your-proxy-pool",
+    "proxies": ["http://proxy1:port", "http://proxy2:port"],
 }
 ```
 
@@ -101,14 +110,22 @@ PROXY_CONFIG = {
 ```
 global-article-scraper/
 ├── main.py                 # CLI 入口
-├── base_scraper.py         # 爬虫基类
-├── config.py               # 配置文件
+├── base_scraper.py         # 爬虫基类 (BaseScraper / PlaywrightScraper)
+├── config.py               # 站点配置、存储配置、代理配置
 ├── scrapers/
-│   ├── __init__.py         # 爬虫注册表
-│   ├── sitemap/            # Sitemap 模式爬虫 (22个)
-│   └── playwright/         # Playwright 模式爬虫 (1个)
+│   ├── __init__.py         # 爬虫注册表 (SCRAPER_REGISTRY / COUNTRY_SCRAPERS)
+│   ├── indonesia/          # 印尼爬虫 (24个)
+│   ├── singapore/          # 新加坡爬虫 (8个)
+│   ├── thailand/           # 泰国爬虫 (3个)
+│   ├── malaysia/           # 马来西亚爬虫 (2个)
+│   ├── philippines/        # 菲律宾爬虫 (2个)
+│   ├── vietnam/            # 越南爬虫 (1个)
+│   ├── taiwan/             # 台湾爬虫 (2个)
+│   ├── hongkong/           # 香港爬虫 (1个)
+│   └── worldwide/          # 跨国/全球爬虫 (21个)
 ├── utils/
-│   └── bq_writer.py        # BigQuery 写入模块
+│   ├── bq_writer.py        # BigQuery 写入模块
+│   └── locations.py        # 城市/国家识别
 ├── .claude/
 │   └── skills/scraper/     # Claude Code Skill
 ├── output/                 # 输出目录
@@ -152,79 +169,13 @@ global-article-scraper/
 
 交互式选择爬虫和参数，执行爬取任务。
 
-**触发方式**：
-```
-"运行 honeycombers 爬虫"
-"爬取 migrationology 的最新文章"
-"/scraper run"
-```
-
-**交互流程**：
-1. 显示爬虫列表
-2. 选择爬虫（参数化爬虫会追问城市）
-3. 配置参数（数量、BigQuery、增量等）
-4. 确认并执行
-
 #### 3. `/scraper health [name]` - 健康检查
 
 检测网站是否改版，爬虫是否还能正常工作。
 
-**触发方式**：
-```
-"检查一下爬虫状态"
-"honeycombers 爬虫是否正常"
-"/scraper health"
-```
-
-**检查项**：
-- Sitemap 可访问性
-- 文章数量变化
-- 内容选择器是否失效
-- 随机抽样验证
-
 #### 4. `/scraper status` - BigQuery 数据状态
 
 查询 BigQuery 中各爬虫的数据现状，按优先级排序。
-
-**触发方式**：
-```
-"查看数据状态"
-"哪些爬虫需要更新"
-"需要增量爬取哪些"
-"/scraper status"
-```
-
-**输出示例**：
-```
-爬虫数据状态
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-状态  爬虫              文章数    上次爬取
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴   alinear           -         从未爬取
-🔴   urbanicon         -         从未爬取
-🟡   renaesworld       500       2025-12-01
-🟢   honeycombers      3,917     2026-02-02
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-优先级: 🔴 从未爬取 > 🟡 超60天未更新 > 🟢 正常
-```
-
-### Skill 文件结构
-
-```
-.claude/skills/scraper/
-├── SKILL.md                    # 主入口
-└── references/
-    ├── build-flow.md           # 构建流程详细说明
-    ├── selectors.md            # HTML 选择器参考
-    └── templates/              # 代码模板
-        ├── sitemap_standard.py.tpl
-        ├── sitemap_yoast.py.tpl
-        ├── sitemap_news.py.tpl
-        ├── sitemap_cdata.py.tpl
-        ├── pagination.py.tpl
-        └── multi_city.py.tpl
-```
 
 ---
 

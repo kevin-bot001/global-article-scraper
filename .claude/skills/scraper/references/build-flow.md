@@ -60,6 +60,127 @@ curl -s https://example.com/articles/ | grep -oE 'href="[^"]*page[^"]*"' | head 
 
 ---
 
+## Phase 1.5: VALIDATE - 验证网站质量（双重验证）
+
+### 1.5a 活跃度验证
+
+从 sitemap `<lastmod>` 或文章页面获取最新发布日期：
+- ✅ 2025+ → 继续
+- ⚠️ 2024 或更早 → AskUserQuestion 确认
+
+### 1.5b POI 内容验证 ⚠️ 关键检查（三级判断，由粗到细）
+
+#### Level 1: URL 模式批量扫描（最快，零额外请求）
+
+从 sitemap 已获取的 URL 列表中批量分析路径模式，无需额外请求：
+
+```python
+from collections import Counter
+
+urls = [...]  # sitemap 中的所有 URL
+
+# 统计 URL 路径中的关键词
+path_keywords = []
+for url in urls:
+    path = urlparse(url).path.lower()
+    path_keywords.extend(re.findall(r'/([a-z-]+)/', path))
+
+keyword_counts = Counter(path_keywords).most_common(20)
+
+# ❌ 食谱站 URL 特征（多语言）
+recipe_patterns = [
+    '/recipe/', '/recipes/', '/resep/', '/resepi/',       # EN/ID/MY
+    '/cara-membuat/', '/cara-masak/',                      # ID
+    '/สูตร/', '/วิธีทำ/',                                    # TH
+    '/cong-thuc/', '/mon-an/',                              # VN
+]
+
+# ✅ POI 站 URL 特征（多语言）
+poi_patterns = [
+    '/restaurant/', '/review/', '/cafe/', '/hotel/',        # EN
+    '/best-/', '/top-/', '/guide/', '/where-to-/',          # EN
+    '/restoran/', '/kuliner/', '/tempat-makan/',            # ID
+    '/ร้านอาหาร/', '/รีวิว/',                                  # TH
+    '/nha-hang/', '/quan-an/', '/dia-diem/',                # VN
+]
+```
+
+如果 URL 模式就能明确判断网站类型 → **跳过 Level 2/3**。
+
+#### Level 2: JSON-LD Schema 类型检测（ANALYZE 阶段顺带做）
+
+在 Phase 2 分析文章 HTML 时顺便检查 JSON-LD `@type`：
+
+```python
+# 在分析 JSON-LD 时检查 schema 类型
+for script in soup.select('script[type="application/ld+json"]'):
+    data = json.loads(script.string or "")
+    types = []
+
+    if "@graph" in data:
+        types = [item.get("@type") for item in data["@graph"]]
+    elif "@type" in data:
+        types = [data["@type"]]
+
+    # ❌ 食谱站
+    if "Recipe" in types:
+        # → 直接拒绝，不构建
+
+    # ✅ POI 站
+    if any(t in types for t in ["Restaurant", "LocalBusiness",
+                                 "Article", "BlogPosting"]):
+        # → 继续构建
+```
+
+#### Level 3: 最新文章内容抽检（仅在 Level 1/2 无法判断时）
+
+取 sitemap 中 **lastmod 最新的 2 篇文章**，使用语言无关的信号检测：
+
+```python
+import re
+
+def has_poi_signals(html):
+    """语言无关的 POI 信号检测"""
+    signals = 0
+
+    # 1. 地址模式: 街道号码、邮编
+    if re.search(r'(?:Jl\.|Jalan|Street|Road|Ave|Blvd|Soi)\s', html):
+        signals += 1
+
+    # 2. Google Maps 链接或嵌入
+    if 'google.com/maps' in html or 'maps.googleapis.com' in html:
+        signals += 1
+
+    # 3. 电话号码模式 (国际格式)
+    if re.search(r'\+\d{2,3}[\s-]?\d', html):
+        signals += 1
+
+    # 4. 营业时间格式 (数字:数字 模式)
+    if re.search(r'\d{1,2}[:.]\d{2}\s*[-–]\s*\d{1,2}[:.]\d{2}', html):
+        signals += 1
+
+    # 5. 榜单格式: H2/H3 编号标题
+    numbered_headings = re.findall(r'<h[23][^>]*>\s*\d+[\.\)]\s', html)
+    if len(numbered_headings) >= 3:
+        signals += 1
+
+    return signals >= 2
+
+```
+
+**判定规则**：
+- ✅ 有 POI 信号 → 继续构建
+- ⚠️ 不确定 → AskUserQuestion 让用户确认
+- ❌ 无 POI 信号 → 拒绝并说明原因
+
+**直接拒绝的类型**：
+- 食谱/烹饪教程网站（URL 含 /recipe/ 或 JSON-LD 含 Recipe）
+- 个人生活博客（无地址、无店铺名、无联系方式）
+- 纯新闻评论站（无具体 POI 信息）
+- 产品评测站（非吃喝玩乐类目）
+
+---
+
 ## Phase 2: ANALYZE - 分析网站结构
 
 ### 2.1 多城市/多语言检测
