@@ -56,84 +56,66 @@ def setup_logging(verbose: bool = False):
 
 
 def print_scraper_list():
-    """打印爬虫列表，分组显示，带完整信息"""
+    """打印爬虫列表，按国家/地区分组显示"""
     scrapers = list_scrapers()
 
-    # 按类型分组
-    sitemap_scrapers = [s for s in scrapers if s["type"] == "sitemap"]
-    playwright_scrapers = [s for s in scrapers if s["type"] == "playwright"]
+    # 按 region 分组，保持固定顺序
+    region_order = [
+        "indonesia", "singapore", "thailand", "malaysia",
+        "philippines", "vietnam", "taiwan", "hongkong", "worldwide",
+    ]
+    region_labels = {
+        "indonesia": "📍 Indonesia",
+        "singapore": "📍 Singapore",
+        "thailand": "📍 Thailand",
+        "malaysia": "📍 Malaysia",
+        "philippines": "📍 Philippines",
+        "vietnam": "📍 Vietnam",
+        "taiwan": "📍 Taiwan",
+        "hongkong": "📍 Hong Kong",
+        "worldwide": "🌏 Worldwide",
+    }
+    by_region = {}
+    for s in scrapers:
+        by_region.setdefault(s["region"], []).append(s)
 
-    # 打印标题
-    print("\n" + "═" * 90)
-    print("                         📡 可用爬虫列表 (共 {} 个)".format(len(scrapers)))
-    print("═" * 90)
+    print("\n" + "═" * 80)
+    print("  📡 可用爬虫列表 (共 {} 个)".format(len(scrapers)))
+    print("═" * 80)
 
-    # 打印 Sitemap 爬虫
-    print("\n🔸 Sitemap 模式 ({} 个)".format(len(sitemap_scrapers)))
-    print("-" * 90)
-    print(f"  {'名称':<22} {'网站':<35} {'地区':<15}")
-    print("-" * 90)
+    for region in region_order:
+        group = by_region.get(region, [])
+        if not group:
+            continue
 
-    for s in sitemap_scrapers:
-        name = s["name"]
-        # 提取域名
-        url = s["base_url"].replace("https://", "").replace("http://", "")
-        if len(url) > 32:
-            url = url[:29] + "..."
+        label = region_labels.get(region, region)
+        print(f"\n{label} ({len(group)}个)")
+        print("-" * 80)
+        print(f"  {'名称':<24} {'网站':<40}")
+        print("-" * 80)
 
-        # 地区显示
-        if s["cities"]:
-            region = f"多城市({len(s['cities'])})"
-        elif s["country"]:
-            region = s["country"]
-        else:
-            region = "全球"
-
-        print(f"  {name:<22} {url:<35} {region:<15}")
-
-        # 多城市爬虫显示支持的城市
-        if s["cities"]:
-            cities_str = ", ".join(s["cities"][:6])
-            if len(s["cities"]) > 6:
-                cities_str += f" 等{len(s['cities'])}个"
-            print(f"    └── 用法: {name}:<city>  支持: {cities_str}")
-
-    # 打印 Playwright 爬虫
-    if playwright_scrapers:
-        print("\n🔸 Playwright 模式 ({} 个)".format(len(playwright_scrapers)))
-        print("-" * 90)
-        print(f"  {'名称':<22} {'网站':<35} {'地区':<15}")
-        print("-" * 90)
-
-        for s in playwright_scrapers:
+        for s in group:
             name = s["name"]
-            url = s["base_url"].replace("https://", "").replace("http://", "")
-            if len(url) > 32:
-                url = url[:29] + "..."
+            url = s["base_url"].replace("https://", "").replace("http://", "").replace("www.", "")
+            if len(url) > 37:
+                url = url[:34] + "..."
 
-            if s["cities"]:
-                region = f"多城市({len(s['cities'])})"
-            elif s["country"]:
-                region = s["country"]
-            else:
-                region = "全球"
-
-            print(f"  {name:<22} {url:<35} {region:<15}")
+            print(f"  {name:<24} {url:<40}")
 
             if s["cities"]:
                 cities_str = ", ".join(s["cities"][:6])
                 if len(s["cities"]) > 6:
-                    cities_str += f" 等{len(s['cities'])}个"
-                print(f"    └── 用法: {name}:<city>  支持: {cities_str}")
+                    cities_str += f" +{len(s['cities']) - 6}"
+                print(f"    └─ {name}:<city>  可选: {cities_str}")
 
-    # 打印使用提示
-    print("\n" + "═" * 90)
+    print("\n" + "═" * 80)
     print("📌 使用示例:")
-    print("   python main.py -s manual_jakarta -l 10      # 运行单个爬虫，限制10篇")
+    print("   python main.py -s eatbook -l 10             # 爬取，限制10篇")
     print("   python main.py -s honeycombers:singapore    # 多城市爬虫指定城市")
-    print("   python main.py -s timeout:jakarta,bangkok   # 多城市爬虫同时爬多个城市")
+    print("   python main.py -s timeout:jakarta,bangkok   # 同时爬多个城市")
+    print("   python main.py -s eater --since 2025-01-01  # 增量爬取")
     print("   python main.py -s renaesworld --bq          # 爬取并写入 BigQuery")
-    print("═" * 90 + "\n")
+    print("═" * 80 + "\n")
 
 
 def run_scraper(

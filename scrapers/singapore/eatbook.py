@@ -1,0 +1,363 @@
+# -*- coding: utf-8 -*-
+"""
+Eatbook.sg Scraper (Sitemap Mode)
+https://eatbook.sg
+Singapore Food Guide
+
+WordPress + Yoast SEO
+Sitemap Index: /sitemap_index.xml
+Article Sitemaps: /post-sitemap.xml ~ /post-sitemap9.xml
+"""
+import json
+import re
+from typing import List, Optional, Generator, Tuple
+from xml.etree import ElementTree
+
+from base_scraper import BaseScraper, Article
+from config import SITE_CONFIGS
+
+
+class EatbookScraper(BaseScraper):
+    """
+    Eatbook.sg Scraper (Sitemap Mode)
+
+    WordPress + Yoast SEO
+    - JSON-LD @graph structured data
+    - Multiple post-sitemaps (post-sitemap.xml ~ post-sitemap9.xml)
+    - Content in div.post-entry
+
+    URL Pattern: /[article-slug]/
+    """
+
+    CONFIG_KEY = "eatbook"
+
+    def __init__(self, use_proxy: bool = False):
+        config = SITE_CONFIGS.get(self.CONFIG_KEY, {})
+        super().__init__(
+            name=config.get("name", "Eatbook.sg"),
+            base_url=config.get("base_url", "https://eatbook.sg"),
+            delay=config.get("delay", 0.5),
+            use_proxy=use_proxy,
+            country=config.get("country", "Singapore"),
+            city=config.get("city", "Singapore"),
+        )
+        self._article_urls_cache = None
+        self.max_sitemaps = config.get("max_sitemaps", 10)
+        self.default_city = self.city  # Alias for compatibility
+
+    def get_article_list_urls(self) -> Generator[str, None, None]:
+        """Generate list page URLs - use special marker for sitemap mode"""
+        yield "sitemap://eatbook"
+
+    def parse_article_list(self, html: str, list_url: str) -> List[str]:
+        """Parse article list page - not used in sitemap mode"""
+        return []
+
+    def fetch_urls_from_sitemap(self) -> List[Tuple[str, str]]:
+        """
+        Fetch article URLs from multiple post-sitemaps
+
+        Returns:
+            [(url, lastmod), ...] sorted by lastmod descending
+        """
+        if self._article_urls_cache is not None:
+            return self._article_urls_cache
+
+        url_with_dates = []
+        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+        # Try sitemap index first
+        index_url = f"{self.base_url}/sitemap_index.xml"
+        response = self.fetch(index_url)
+
+        sitemap_urls = []
+        if response:
+            try:
+                root = ElementTree.fromstring(response.content)
+                for sitemap_el in root.findall(".//sm:sitemap", ns):
+                    loc = sitemap_el.find("sm:loc", ns)
+                    if loc is not None and loc.text and "post-sitemap" in loc.text:
+                        sitemap_urls.append(loc.text.strip())
+            except ElementTree.ParseError:
+                pass
+
+        # Fallback to default pattern
+        if not sitemap_urls:
+            sitemap_urls = [f"{self.base_url}/post-sitemap.xml"]
+            for i in range(2, self.max_sitemaps + 1):
+                sitemap_urls.append(f"{self.base_url}/post-sitemap{i}.xml")
+
+        self.logger.info(f"Found {len(sitemap_urls)} post-sitemaps")
+
+        # Fetch each sitemap
+        for sitemap_url in sitemap_urls:
+            response = self.fetch(sitemap_url)
+            if not response:
+                continue
+
+            try:
+                root = ElementTree.fromstring(response.content)
+                for url_el in root.findall(".//sm:url", ns):
+                    loc = url_el.find("sm:loc", ns)
+                    lastmod = url_el.find("sm:lastmod", ns)
+
+                    if loc is not None and loc.text:
+                        url = loc.text.strip()
+                        if self.is_valid_article_url(url):
+                            mod_date = lastmod.text.strip() if lastmod is not None and lastmod.text else ""
+                            url_with_dates.append((url, mod_date))
+
+            except ElementTree.ParseError as e:
+                self.logger.error(f"Failed to parse sitemap: {sitemap_url} - {e}")
+
+        # Sort by lastmod descending
+        url_with_dates.sort(key=lambda x: x[1] if x[1] else "", reverse=True)
+        self._article_urls_cache = url_with_dates
+
+        self.logger.info(f"Found {len(url_with_dates)} articles from sitemap")
+        return url_with_dates
+
+    def is_valid_article_url(self, url: str) -> bool:
+        """Check if URL is a valid article URL"""
+        if not url or "eatbook.sg" not in url:
+            return False
+
+        # Exclude non-article pages
+        exclude_patterns = [
+            "/wp-admin/", "/wp-content/", "/wp-includes/",
+            "/tag/", "/category/", "/author/", "/page/",
+            "/search/", "/attachment/", "/feed/",
+            "/about", "/contact", "/privacy", "/terms",
+            "/shop/", "/product/", "/cart/", "/checkout/",
+            "/advertise", "/disclaimer", "/editorial",
+        ]
+        url_lower = url.lower()
+        if any(p in url_lower for p in exclude_patterns):
+            return False
+
+        # Exclude homepage
+        path = url.replace(self.base_url, "").strip("/")
+        if not path:
+            return False
+
+        return True
+
+    def _parse_json_ld(self, soup) -> dict:
+        """
+        Parse Yoast SEO JSON-LD @graph structure
+
+        Returns:
+            Dict with datePublished, dateModified, author, headline
+        """
+        result = {}
+
+        for script in soup.select('script[type="application/ld+json"]'):
+            try:
+                data = json.loads(script.string or "")
+                items = data if isinstance(data, list) else [data]
+
+                for item in items:
+                    # Direct Article format
+                    if item.get("@type") in ["Article", "BlogPosting", "NewsArticle"]:
+                        if item.get("datePublished"):
+                            result["datePublished"] = item["datePublished"]
+                        if item.get("dateModified"):
+                            result["dateModified"] = item["dateModified"]
+                        if item.get("headline"):
+                            result["headline"] = item["headline"]
+
+                    # Author in direct format
+                    if "author" in item:
+                        author = item["author"]
+                        if isinstance(author, dict):
+                            result["author"] = author.get("name", "")
+                        elif isinstance(author, str):
+                            result["author"] = author
+
+                    # @graph format (Yoast SEO)
+                    if "@graph" in item:
+                        for graph_item in item["@graph"]:
+                            if graph_item.get("@type") in ["Article", "BlogPosting", "NewsArticle"]:
+                                if graph_item.get("datePublished"):
+                                    result["datePublished"] = graph_item["datePublished"]
+                                if graph_item.get("dateModified"):
+                                    result["dateModified"] = graph_item["dateModified"]
+                                if graph_item.get("headline"):
+                                    result["headline"] = graph_item["headline"]
+                            if graph_item.get("@type") == "Person" and graph_item.get("name"):
+                                result["author"] = graph_item["name"]
+
+            except (json.JSONDecodeError, TypeError, KeyError):
+                continue
+
+        return result
+
+    def extract_content(self, html: str) -> str:
+        """
+        Extract main content from HTML
+
+        Eatbook uses div.post-entry as main content container
+        """
+        soup = self.parse_html(html)
+
+        content_selectors = [
+            "div.post-entry",
+            ".entry-content",
+            "article .content",
+            "article",
+        ]
+
+        for selector in content_selectors:
+            content_el = soup.select_one(selector)
+            if content_el:
+                # Remove unwanted elements
+                for tag in content_el.find_all([
+                    "script", "style", "nav", "aside", "iframe",
+                    "button", "form", "noscript"
+                ]):
+                    tag.decompose()
+
+                # Remove WordPress/social/ad elements (Eatbook specific)
+                for css_sel in [
+                    ".sharedaddy", ".jp-relatedposts", ".related-posts",
+                    ".social-share", ".post-share", ".share-buttons",
+                    ".newsletter", ".optin", ".cta-box", ".ad", ".ads",
+                    ".author-box", ".author-info",
+                    # Eatbook specific: CTA wrappers and ad code blocks
+                    ".cta-wrapper", ".code-block", "[class*='ai-check']",
+                    ".mashsb-container", ".mashsb-box", ".mashsb-count",
+                ]:
+                    for el in content_el.select(css_sel):
+                        el.decompose()
+
+                content = content_el.decode_contents()
+                # Remove HTML comments
+                content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
+                # Clean up excessive whitespace
+                content = re.sub(r'\n{3,}', '\n\n', content)
+                content = content.strip()
+                if len(content) > 200:
+                    return content
+
+        return ""
+
+    def parse_article(self, html: str, url: str) -> Optional[Article]:
+        """Parse article detail page"""
+        soup = self.parse_html(html)
+
+        # Parse JSON-LD structured data
+        json_ld = self._parse_json_ld(soup)
+
+        # Title - prefer JSON-LD
+        title = json_ld.get("headline", "")
+        if not title:
+            title_selectors = [
+                "h1.entry-title",
+                "h1.post-title",
+                ".entry-header h1",
+                "article h1",
+                "h1",
+            ]
+            for selector in title_selectors:
+                title_el = soup.select_one(selector)
+                if title_el:
+                    title = self.clean_text(title_el.get_text())
+                    if title:
+                        break
+
+        if not title:
+            # Fallback to og:title
+            og_title = soup.select_one("meta[property='og:title']")
+            if og_title:
+                title = og_title.get("content", "")
+
+        if not title:
+            return None
+
+        # Content
+        content = self.extract_content(html)
+
+        # Author - prefer JSON-LD
+        author = json_ld.get("author", "")
+        if not author:
+            author_selectors = [
+                ".author-name",
+                ".entry-author a",
+                "a[rel='author']",
+                ".byline a",
+            ]
+            for selector in author_selectors:
+                author_el = soup.select_one(selector)
+                if author_el:
+                    author = self.clean_text(author_el.get_text())
+                    if author:
+                        break
+
+        # Publish date - prefer JSON-LD
+        publish_date = json_ld.get("datePublished", "")
+        if not publish_date:
+            date_selectors = [
+                "time[datetime]",
+                ".entry-date",
+                ".post-date",
+                "meta[property='article:published_time']",
+            ]
+            for selector in date_selectors:
+                date_el = soup.select_one(selector)
+                if date_el:
+                    publish_date = date_el.get("datetime") or date_el.get("content") or self.clean_text(date_el.get_text())
+                    if publish_date:
+                        break
+
+        # Category
+        category = ""
+        cat_selectors = [
+            ".cat-links a",
+            ".entry-categories a",
+            "a[rel='category tag']",
+            "a[href*='/category/']",
+        ]
+        for selector in cat_selectors:
+            cat_el = soup.select_one(selector)
+            if cat_el:
+                category = self.clean_text(cat_el.get_text())
+                if category:
+                    break
+
+        # Tags
+        tags = []
+        for tag_el in soup.select(".tag-links a, .entry-tags a, a[rel='tag']"):
+            tag = self.clean_text(tag_el.get_text())
+            if tag and tag not in tags:
+                tags.append(tag)
+
+        # Images
+        images = []
+        # Featured image
+        featured = soup.select_one(".post-thumbnail img, .entry-thumbnail img, .featured-image img")
+        if featured:
+            src = featured.get("src") or featured.get("data-src")
+            if src:
+                images.append(self.absolute_url(src))
+
+        # Content images
+        for img in soup.select(".post-entry img, .entry-content img, article img"):
+            src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+            if src and not src.endswith(".svg"):
+                full_src = self.absolute_url(src)
+                if full_src not in images:
+                    images.append(full_src)
+
+        return Article(
+            url=url,
+            title=title,
+            content=content,
+            author=author or "Eatbook.sg",
+            publish_date=publish_date,
+            category=category,
+            tags=tags,
+            images=images[:10],
+            language="en",
+            country=self.country,
+            city=self.default_city,
+        )

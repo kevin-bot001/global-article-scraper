@@ -10,6 +10,7 @@ import json
 import logging
 import tempfile
 import os
+import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -64,7 +65,6 @@ class BQWriter:
         self.dataset = dataset
         self.table = table
         self.table_id = f"{self.project_id}.{self.dataset}.{self.table}"
-        self.staging_table_id = f"{self.table_id}_staging"
 
     def _get_schema(self):
         """获取表 schema"""
@@ -217,6 +217,7 @@ class BQWriter:
 
         try:
             job_config = self.bq.LoadJobConfig(
+                schema=self._get_schema(),
                 source_format=self.bq.SourceFormat.NEWLINE_DELIMITED_JSON,
                 write_disposition=self.bq.WriteDisposition.WRITE_APPEND,
             )
@@ -232,10 +233,14 @@ class BQWriter:
 
     def _write_batch_merge(self, rows: List[Dict]) -> int:
         """MERGE 写入（url + source 去重，存在则更新）"""
-        # 创建/清空 staging 表
-        staging_table = self.bq.Table(self.staging_table_id, schema=self._get_schema())
+        # 用唯一后缀避免并行写入冲突
+        suffix = uuid.uuid4().hex[:8]
+        staging_id = f"{self.table_id}_staging_{suffix}"
+
+        # 创建 staging 表
+        staging_table = self.bq.Table(staging_id, schema=self._get_schema())
         try:
-            self.client.delete_table(self.staging_table_id, not_found_ok=True)
+            self.client.delete_table(staging_id, not_found_ok=True)
         except Exception:
             pass
         self.client.create_table(staging_table)
@@ -248,12 +253,13 @@ class BQWriter:
 
         try:
             job_config = self.bq.LoadJobConfig(
+                schema=self._get_schema(),
                 source_format=self.bq.SourceFormat.NEWLINE_DELIMITED_JSON,
                 write_disposition=self.bq.WriteDisposition.WRITE_TRUNCATE,
             )
 
             with open(temp_file, 'rb') as f:
-                job = self.client.load_table_from_file(f, self.staging_table_id, job_config=job_config)
+                job = self.client.load_table_from_file(f, staging_id, job_config=job_config)
             job.result()
 
         finally:
@@ -262,7 +268,7 @@ class BQWriter:
         # MERGE 到目标表
         merge_sql = f"""
         MERGE `{self.table_id}` T
-        USING `{self.staging_table_id}` S
+        USING `{staging_id}` S
         ON T.url = S.url AND T.source = S.source
         WHEN MATCHED THEN
             UPDATE SET
@@ -288,7 +294,7 @@ class BQWriter:
         job.result()
 
         # 清理 staging 表
-        self.client.delete_table(self.staging_table_id, not_found_ok=True)
+        self.client.delete_table(staging_id, not_found_ok=True)
 
         return len(rows)
 

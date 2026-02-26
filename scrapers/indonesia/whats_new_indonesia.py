@@ -187,8 +187,8 @@ class WhatsNewIndonesiaScraper(BaseScraper):
         if not url or self.base_url not in url:
             return False
 
-        # 必须包含城市
-        if f"/{self.city}/" not in url:
+        # 必须包含城市（URL 中城市为小写）
+        if f"/{self.city.lower()}/" not in url.lower():
             return False
 
         # 排除分类导航页的slug

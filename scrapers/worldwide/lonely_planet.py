@@ -1,21 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-Lonely Planet Scraper (Category Page Mode)
+Lonely Planet Scraper (Pagination Mode)
 https://www.lonelyplanet.com/articles
 
-Global travel guide website - no working sitemap, use category pages to fetch articles.
+Global travel guide website covering destinations, food, adventure and culture worldwide.
 
 Features:
-- 13 article categories (adventure, food-and-drink, beaches, etc.)
-- Continent filter support (default: asia)
-- JSON-LD NewsArticle metadata
+- Pagination mode: /articles/page/{N}?slug={continent}
+- Continent filter via ?slug= param (asia, europe, etc.)
+- Default: asia (~4 pages). Without filter: 225+ pages
+- JSON-LD NewsArticle metadata (headline, datePublished, author, image)
 - Content in div.content-block
-- curl_cffi bypasses 403 Cloudflare protection
+- curl_cffi bypasses CloudFront protection
+- No sitemap available (returns 404)
+- robots.txt allows /articles/page/ but disallows /articles/category/
 
 Usage:
-    scraper = LonelyPlanetScraper(continent="asia")  # Default
-    scraper = LonelyPlanetScraper(continent="europe")  # Other continents
-    scraper = LonelyPlanetScraper(continent=None)  # All continents (no filter)
+    scraper = LonelyPlanetScraper()                      # Default: asia
+    scraper = LonelyPlanetScraper(continent="europe")    # Europe
+    scraper = LonelyPlanetScraper(continent=None)        # All continents
 """
 import json
 from typing import List, Optional, Generator
@@ -29,30 +32,14 @@ class LonelyPlanetScraper(BaseScraper):
     """
     Lonely Planet Scraper
 
-    Fetches articles from category pages since sitemap is broken.
-    Uses JSON-LD for metadata extraction.
+    Fetches articles from /articles/page/{N} pagination pages.
+    Supports continent filter via ?slug= parameter.
+    Uses JSON-LD NewsArticle for metadata extraction.
     """
 
     CONFIG_KEY = "lonely_planet"
 
-    # All available categories
-    CATEGORIES = [
-        "adventure",
-        "adventure-travel",
-        "art-and-culture",
-        "beaches",
-        "budget-travel",
-        "family-travel",
-        "festivals-and-events",
-        "food-and-drink",
-        "road-trips",
-        "romance",
-        "sustainable-travel",
-        "travel-advice",
-        "wildlife-and-nature",
-    ]
-
-    # Available continent filters
+    # Available continent slugs
     CONTINENTS = [
         "europe", "asia", "north-america", "south-america",
         "pacific", "africa", "middle-east", "caribbean",
@@ -62,40 +49,55 @@ class LonelyPlanetScraper(BaseScraper):
     def __init__(self, use_proxy: bool = False, continent: str = None):
         config = SITE_CONFIGS.get(self.CONFIG_KEY, {})
 
-        # Continent filter (default to asia)
-        self.continent = continent or config.get("continent", "asia")
+        # Continent filter: explicit param > config > default "asia"
+        if continent is not None:
+            self.continent = continent
+        else:
+            self.continent = config.get("continent", "asia")
+
+        # Build display name with continent
+        base_name = config.get("name", "Lonely Planet")
+        display_name = f"{base_name} ({self.continent.title()})" if self.continent else base_name
 
         super().__init__(
-            name=config.get("name", "Lonely Planet") + f" ({self.continent.title()})",
+            name=display_name,
             base_url=config.get("base_url", "https://www.lonelyplanet.com"),
-            delay=config.get("delay", 0.5),
+            delay=config.get("delay", 1.0),
             use_proxy=use_proxy,
-            country=config.get("country", ""),  # Global site, detect from content
+            country=config.get("country", ""),
             city=config.get("city", ""),
         )
 
-        # Get categories from config or use all
-        self.categories = config.get("categories", []) or self.CATEGORIES
+        self.max_pages = config.get("max_pages", 225)
 
     def get_article_list_urls(self) -> Generator[str, None, None]:
-        """Signal category mode (not used in scrape_all)"""
-        yield "category://"
+        """Signal pagination mode (not used in scrape_all)"""
+        yield "pagination://"
 
     def parse_article_list(self, html: str, list_url: str) -> List[str]:
-        """Not used in category mode"""
+        """Not used in pagination mode"""
         return []
 
     def fetch_urls_from_sitemap(self) -> List[tuple]:
         """Not using sitemap mode"""
         return []
 
-    def _fetch_category_urls(self, category: str) -> List[str]:
+    def _fetch_page_urls(self, page_num: int) -> List[str]:
         """
-        Fetch article URLs from a single category page.
-        Only fetches page 1 since pagination doesn't work properly.
+        Fetch article URLs from a single pagination page.
+
+        Args:
+            page_num: Page number (1-based)
+
+        Returns:
+            List of unique article URLs found on the page
         """
-        # Add continent filter if set
-        url = f"{self.base_url}/articles/category/{category}"
+        if page_num == 1:
+            url = f"{self.base_url}/articles"
+        else:
+            url = f"{self.base_url}/articles/page/{page_num}"
+
+        # Append continent filter if set
         if self.continent:
             url += f"?slug={self.continent}"
 
@@ -106,56 +108,72 @@ class LonelyPlanetScraper(BaseScraper):
         soup = self.parse_html(response.text)
         urls = []
 
-        # Find article links - /articles/{slug} pattern
-        for link in soup.select("a[href*='/articles/']"):
-            href = link.get("href", "")
-            if href and self.is_valid_article_url(href):
-                full_url = self.absolute_url(href)
-                if full_url not in urls:
-                    urls.append(full_url)
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
 
-        self.logger.debug(f"Category [{category}] found {len(urls)} articles")
+            if "/articles/" not in href:
+                continue
+
+            full_url = self.absolute_url(href)
+
+            if self.is_valid_article_url(full_url) and full_url not in urls:
+                urls.append(full_url)
+
+        self.logger.debug(f"Page {page_num} found {len(urls)} articles")
         return urls
 
     def scrape_all(self, limit: int = 0, since: str = None, exclude_urls: set = None) -> List[Article]:
         """
-        Scrape articles from all category pages.
+        Scrape articles from pagination pages.
+
+        Iterates through /articles/page/{N} pages to collect article URLs,
+        then scrapes each article page concurrently.
 
         Args:
             limit: Max articles to scrape, 0 for unlimited
-            since: Only articles after this date (YYYY-MM-DD), based on publish_date
+            since: Only articles after this date (YYYY-MM-DD)
             exclude_urls: URLs to skip (already scraped)
 
         Returns:
             List of Article objects
         """
-        self.logger.info(f"Starting {self.name} (category page mode)...")
+        self.logger.info(f"Starting {self.name} (pagination mode)...")
         if since:
             self.logger.info(f"Date filter enabled: since={since}")
 
         exclude_urls = exclude_urls or set()
         all_urls = set()
 
-        # Collect URLs from all categories
-        for category in self.categories:
-            self.logger.info(f"Fetching category [{category}]...")
-            category_urls = self._fetch_category_urls(category)
+        # Collect URLs from pagination pages
+        for page_num in range(1, self.max_pages + 1):
+            self.logger.info(f"Fetching page {page_num}/{self.max_pages}...")
+            page_urls = self._fetch_page_urls(page_num)
+
+            if not page_urls:
+                self.logger.info(f"Page {page_num} returned 0 articles, stopping pagination")
+                break
 
             # Filter out excluded URLs
-            new_urls = [url for url in category_urls if url not in exclude_urls and url not in all_urls]
+            new_urls = [url for url in page_urls if url not in exclude_urls and url not in all_urls]
             all_urls.update(new_urls)
 
-            self.logger.info(f"Category [{category}]: {len(new_urls)} new articles (total: {len(all_urls)})")
+            self.logger.info(f"Page {page_num}: {len(new_urls)} new articles (total: {len(all_urls)})")
+
+            # Early stop if we have enough URLs (with buffer for date filtering)
+            if limit:
+                target = limit * 3 if since else limit
+                if len(all_urls) >= target:
+                    self.logger.info(f"Collected enough URLs ({len(all_urls)}), stopping pagination")
+                    break
 
         self.logger.info(f"Total unique articles found: {len(all_urls)}")
 
         if not all_urls:
             return []
 
-        # Apply limit if set
+        # Apply limit
         urls_to_scrape = list(all_urls)
         if limit and len(urls_to_scrape) > limit:
-            # Over-fetch to account for date filtering
             fetch_limit = limit * 2 if since else limit
             urls_to_scrape = urls_to_scrape[:fetch_limit]
 
@@ -165,7 +183,10 @@ class LonelyPlanetScraper(BaseScraper):
         skipped_by_date = 0
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_url = {executor.submit(self.scrape_article, url): url for url in urls_to_scrape}
+            future_to_url = {
+                executor.submit(self.scrape_article, url): url
+                for url in urls_to_scrape
+            }
 
             for future in as_completed(future_to_url):
                 url = future_to_url[future]
@@ -177,12 +198,13 @@ class LonelyPlanetScraper(BaseScraper):
                             pub_date = normalize_date(article.publish_date)
                             if pub_date and pub_date < since:
                                 skipped_by_date += 1
-                                self.logger.debug(f"Date filter skipped: {article.title} ({pub_date})")
+                                self.logger.debug(
+                                    f"Date filter skipped: {article.title} ({pub_date})"
+                                )
                                 continue
 
                         all_articles.append(article)
 
-                        # Check limit
                         if limit and len(all_articles) >= limit:
                             self.logger.info(f"Reached limit of {limit} articles")
                             break
@@ -190,7 +212,7 @@ class LonelyPlanetScraper(BaseScraper):
                 except Exception as e:
                     self.logger.error(f"Failed to scrape {url}: {e}")
 
-        # Build log message
+        # Log summary
         log_lines = [
             f"Scraping completed: {self.name}",
             f"  Total requests: {self.stats['total_requests']}",
@@ -205,27 +227,28 @@ class LonelyPlanetScraper(BaseScraper):
         return all_articles
 
     def is_valid_article_url(self, url: str) -> bool:
-        """Check if URL is a valid article page"""
+        """Check if URL is a valid Lonely Planet article page"""
         if not url:
             return False
 
         url_lower = url.lower()
 
-        # Must be from main domain (not support/shop subdomains)
+        # Must be from main domain
         if "support.lonelyplanet.com" in url_lower or "shop.lonelyplanet.com" in url_lower:
             return False
 
-        # Must contain /articles/ but not /category/
+        # Must contain /articles/ path
         if "/articles/" not in url_lower:
-            return False
-        if "/category/" in url_lower:
             return False
 
         # Exclude non-article patterns
         exclude_patterns = [
-            "/destinations/", "/search", "/author/",
+            "/articles/page/",        # Pagination pages
+            "/articles/category/",    # Category index pages
+            "/destinations/",
+            "/search", "/author/",
             ".jpg", ".png", ".pdf", ".css", ".js",
-            "/hc/", "/help/",  # Help center links
+            "/hc/", "/help/",
         ]
         if any(p in url_lower for p in exclude_patterns):
             return False
@@ -247,13 +270,18 @@ class LonelyPlanetScraper(BaseScraper):
         """Extract article body from content-block div"""
         soup = self.parse_html(html)
 
-        # Lonely Planet specific selector
+        # Primary selector: div.content-block
         content_div = soup.find("div", class_=lambda c: c and "content-block" in c)
         if content_div:
             # Remove unwanted elements
-            for tag in content_div.find_all(["script", "style", "nav", "aside", "iframe", "noscript"]):
+            for tag in content_div.find_all([
+                "script", "style", "nav", "aside", "iframe",
+                "noscript", "button", "form", "footer"
+            ]):
                 tag.decompose()
-            for css_sel in [".share", ".social", ".ad", ".related", ".newsletter"]:
+
+            for css_sel in [".share", ".social", ".ad", ".related",
+                            ".newsletter", ".outbrain"]:
                 for el in content_div.select(css_sel):
                     el.decompose()
 
@@ -261,20 +289,22 @@ class LonelyPlanetScraper(BaseScraper):
             if len(content) > 200:
                 return content
 
-        # Fallback to article tag
-        article = soup.find("article")
-        if article:
-            for tag in article.find_all(["script", "style", "nav", "aside"]):
+        # Fallback: main tag
+        main = soup.find("main")
+        if main:
+            for tag in main.find_all(["script", "style", "nav", "aside"]):
                 tag.decompose()
-            return article.decode_contents()
+            content = main.decode_contents()
+            if len(content) > 200:
+                return content
 
         return ""
 
     def parse_article(self, html: str, url: str) -> Optional[Article]:
-        """Parse article page and extract metadata"""
+        """Parse Lonely Planet article page and extract metadata"""
         soup = self.parse_html(html)
 
-        # Try JSON-LD first (most reliable)
+        # JSON-LD is the primary metadata source
         json_ld = self._parse_json_ld(soup)
 
         # Title
@@ -283,7 +313,6 @@ class LonelyPlanetScraper(BaseScraper):
             h1 = soup.find("h1")
             if h1:
                 title = self.clean_text(h1.get_text())
-
         if not title:
             og_title = soup.select_one("meta[property='og:title']")
             if og_title:
@@ -292,10 +321,15 @@ class LonelyPlanetScraper(BaseScraper):
         if not title:
             return None
 
+        # Skip template/redirect pages (old URLs redirect to LP homepage)
+        if title.lower() in ("we know where to go", "lonely planet"):
+            self.logger.debug(f"Skipping template page: {title} ({url})")
+            return None
+
         # Content
         content = self.extract_content(html)
 
-        # Author - from JSON-LD or fallback
+        # Author
         author = ""
         if json_ld.get("author"):
             authors = json_ld["author"]
@@ -303,33 +337,34 @@ class LonelyPlanetScraper(BaseScraper):
                 author = authors[0].get("name", "")
             elif isinstance(authors, dict):
                 author = authors.get("name", "")
-
         if not author:
             author_meta = soup.select_one("meta[name='author']")
             if author_meta:
                 author = author_meta.get("content", "")
 
-        # Publish date from JSON-LD
-        publish_date = json_ld.get("datePublished") or ""
+        # Publish date
+        publish_date = json_ld.get("datePublished", "")
         if not publish_date:
             date_meta = soup.select_one("meta[property='article:published_time']")
             if date_meta:
                 publish_date = date_meta.get("content", "")
 
-        # Category - try to extract from URL or breadcrumb
+        # Category - infer from URL slug pattern
         category = ""
-        # Check if URL has category hint
         if "/articles/best-" in url:
             category = "Best Of"
         elif "/articles/how-" in url or "/articles/getting-" in url:
             category = "Travel Tips"
+        elif "/articles/top-" in url:
+            category = "Best Of"
+        elif "/articles/where-" in url:
+            category = "Guides"
 
-        # Tags - not readily available, leave empty
+        # Tags - not available in JSON-LD
         tags = []
 
         # Images
         images = []
-        # From JSON-LD
         if json_ld.get("image"):
             img_data = json_ld["image"]
             if isinstance(img_data, dict):
@@ -339,23 +374,11 @@ class LonelyPlanetScraper(BaseScraper):
             elif isinstance(img_data, str):
                 images.append(img_data)
 
-        # From og:image
         og_image = soup.select_one("meta[property='og:image']")
         if og_image:
             img_url = og_image.get("content")
             if img_url and img_url not in images:
                 images.append(img_url)
-
-        # Content images
-        if content:
-            content_soup = self.parse_html(content)
-            for img in content_soup.find_all("img"):
-                src = img.get("src") or img.get("data-src")
-                if src and not src.endswith(".svg") and src not in images:
-                    images.append(self.absolute_url(src))
-
-        # Use continent as country since it's a global site filtered by region
-        country = self.continent.title() if self.continent else ""
 
         return Article(
             url=url,
@@ -367,6 +390,6 @@ class LonelyPlanetScraper(BaseScraper):
             tags=tags,
             images=images[:10],
             language="en",
-            country=country,  # Use continent filter as region indicator
+            country="",   # Global site, auto-detect from content
             city="",
         )

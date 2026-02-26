@@ -286,23 +286,23 @@ class BaseScraper(ABC):
             return ""
         return urljoin(self.base_url, url)
 
-    def detect_location_from_title(self, title: str, url: str = "") -> tuple:
+    def detect_location_from_title(self, title: str, url: str = "", preferred_country: str = "") -> tuple:
         """
         从标题和URL中识别国家和城市（使用单词边界匹配）
 
-        优先级：标题 > URL slug
+        优先匹配 preferred_country 范围内的地名，避免跨国 city 污染。
+        例如印尼爬虫遇到标题 "Best Singapore-style food in Jakarta"，
+        优先匹配 Jakarta 而不是 Singapore。
 
         Args:
             title: 文章标题
             url: 文章URL（可选）
+            preferred_country: 优先匹配的国家（爬虫默认国家）
 
         Returns:
             (country, city) 元组，识别不到返回空字符串
         """
         import re
-
-        detected_country = ""
-        detected_city = ""
 
         # 合并标题和URL进行匹配（标题优先，放前面）
         # URL 提取 path 部分，将 - 替换为空格
@@ -318,24 +318,34 @@ class BaseScraper(ABC):
         # 按地名长度降序排列，先匹配更具体的地名（如 "nusa dua" 优先于 "bali"）
         sorted_locations = sorted(LOCATION_MAP.items(), key=lambda x: len(x[0]), reverse=True)
 
-        # 匹配地名 → (country, city)，使用单词边界避免误匹配
-        for location, (country, city) in sorted_locations:
-            # \b 单词边界匹配，避免 "menemukan" 里的 "uk" 被误识别
-            pattern = r'\b' + re.escape(location) + r'\b'
-            if re.search(pattern, search_text):
-                detected_country = country
-                detected_city = city
-                break
-
-        # 如果没匹配到地名，再匹配国家名（同样用单词边界）
-        if not detected_country:
-            for country_name in COUNTRY_NAMES:
-                pattern = r'\b' + re.escape(country_name) + r'\b'
+        def _find_match(filter_country: str = ""):
+            """在 LOCATION_MAP 中查找匹配，可选按国家过滤"""
+            for location, (country, city) in sorted_locations:
+                if filter_country and country != filter_country:
+                    continue
+                pattern = r'\b' + re.escape(location) + r'\b'
                 if re.search(pattern, search_text):
-                    detected_country = country_name.title()
-                    break
+                    return country, city
+            return None
 
-        return detected_country, detected_city
+        # Pass 1: 优先在 preferred_country 范围内匹配
+        if preferred_country:
+            result = _find_match(filter_country=preferred_country)
+            if result:
+                return result
+
+        # Pass 2: 全局匹配任意地名
+        result = _find_match()
+        if result:
+            return result
+
+        # Pass 3: 匹配纯国家名（没有城市信息）
+        for country_name in COUNTRY_NAMES:
+            pattern = r'\b' + re.escape(country_name) + r'\b'
+            if re.search(pattern, search_text):
+                return country_name.title(), ""
+
+        return "", ""
 
     def is_valid_article_url(self, url: str) -> bool:
         """检查是否为有效的文章URL（子类可重写）"""
@@ -465,10 +475,11 @@ class BaseScraper(ABC):
                 article.source = self.name
                 article.scraped_at = datetime.utcnow().isoformat()
 
-                # 设置 country 和 city：优先保留 parse_article 设置的值，其次从标题/URL识别，最后用默认值
-                detected_country, detected_city = self.detect_location_from_title(article.title, url)
-                article.country = article.country or detected_country or self.country
-                article.city = article.city or detected_city or self.city
+                # 设置 country 和 city：title/URL 检测 > parse_article 解析 > 爬虫默认值
+                preferred = article.country or self.country
+                detected_country, detected_city = self.detect_location_from_title(article.title, url, preferred_country=preferred)
+                article.country = detected_country or article.country or self.country
+                article.city = detected_city or article.city or self.city
 
                 # 统一日期格式为 ISO 8601
                 article.publish_date = normalize_date(article.publish_date)
@@ -1046,10 +1057,11 @@ class PlaywrightScraper(BaseScraper):
                 article.source = self.name
                 article.scraped_at = datetime.utcnow().isoformat()
 
-                # 设置 country 和 city：优先保留 parse_article 设置的值，其次从标题/URL识别，最后用默认值
-                detected_country, detected_city = self.detect_location_from_title(article.title, url)
-                article.country = article.country or detected_country or self.country
-                article.city = article.city or detected_city or self.city
+                # 设置 country 和 city：title/URL 检测 > parse_article 解析 > 爬虫默认值
+                preferred = article.country or self.country
+                detected_country, detected_city = self.detect_location_from_title(article.title, url, preferred_country=preferred)
+                article.country = detected_country or article.country or self.country
+                article.city = detected_city or article.city or self.city
 
                 # 统一日期格式为 ISO 8601
                 article.publish_date = normalize_date(article.publish_date)
