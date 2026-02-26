@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Environment & credentials
+.env
+.env.local
+credentials/
+*.json
+
+# Output data
+output/
+*.log
+
+# Claude Code / Spec workflow
+.claude/
+.spec-workflow/
+CLAUDE.md
+NEW_SOURCES.md
+
+# Playwright MCP
+.playwright-mcp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker & CI/CD
+Dockerfile
+docker-compose*.yml
+.dockerignore
+cloudbuild.yaml
